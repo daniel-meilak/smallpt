@@ -1,7 +1,35 @@
 #include <cmath>   
 #include <cstdlib> 
 #include <cstdio>
-#include <vector>  
+#include <iostream>
+#include <random>
+#include <vector>
+
+// // seed for randum num generator
+// static unsigned long s[2] = {1,1};
+
+// static inline unsigned long rotl(const unsigned long x, int k) {
+// 	return (x << k) | (x >> (64 - k));
+// }
+
+// // random number generator, using xoroshiro128+ for speed (outputs in range 0-1)
+// unsigned long next(void) {
+// 	const unsigned long s0 = s[0];
+// 	unsigned long s1 = s[1];
+// 	const unsigned long result = s0 + s1;
+
+// 	s1 ^= s0;
+// 	s[0] = rotl(s0, 24) ^ s1 ^ (s1 << 16); // a, b
+// 	s[1] = rotl(s1, 37); // c
+
+// 	return (result >> 11) * 0x1.0p-53;
+// }
+
+unsigned short Xi[3] = {0,0,5};
+double next(){
+   return erand48(Xi);
+}
+
 
 // material types, used in radiance()
 enum Refl_t{ DIFF, SPEC, REFR };
@@ -55,8 +83,17 @@ struct Sphere{
    // Solve t^2*d.d + 2*t*(o-p).d + (o-p).(o-p)-R^2 = 0
    double intersect(const Ray& ray) const{
       Vec op = position - ray.origin;
-      double t, eps = 1e-4, b = op.dot(ray.direction), det = b * b - op.dot(op) + radius * radius;
+      
+      // fudge factor
+      double t, eps = 1e-4;
 
+      // 1/2 b from quadratic equation setup
+      double b = op.dot(ray.direction);
+      
+      // (b^2 -4ac)/4 - a=1 due to normalization
+      double det = b * b - op.dot(op) + radius * radius;
+
+      // if ray misses sphere
       if (det < 0){ return 0; }
       else { det = sqrt(det); }
 
@@ -78,72 +115,186 @@ std::vector<Sphere> spheres = {
    Sphere(600 , Vec(50,681.6 - .27,81.6), Vec(12,12,12), Vec()            , DIFF)   //Lite
 };
 
+// value must be between 0-1
 inline double clamp(double x){ return x < 0 ? 0 : x>1 ? 1 : x; }
 
+// rgb value made by scaling to 0-255, with gamma correction of 2.2
 inline int toInt(double x){ return int(pow(clamp(x), 1 / 2.2) * 255 + .5); }
 
+// intersection of ray with scene
 inline bool intersect(const Ray& ray, double& t, int& id){
    
-   size_t n = spheres.size();
    double d, inf = t = 1e20;
    
-   for (int i = int(n);i--;){
-      if ((d = spheres[i].intersect(ray)) && d < t){ t = d;id = i; }
+   for (size_t i = spheres.size(); i--;){
+      
+      if ((d = spheres[i].intersect(ray)) && d < t){
+         t  = d;
+         id = i;
+      }
    }
    
    return t < inf;
 }
 
-Vec radiance(const Ray& r, int depth, unsigned short* Xi){
-   double t;                               // distance to intersection
-   int id = 0;                               // id of intersected object
-   if (!intersect(r, t, id)) return Vec(); // if miss, return black
-   const Sphere& obj = spheres[id];        // the hit object
-   Vec x = r.o + r.d * t, n = (x - obj.p).norm(), nl = n.dot(r.d) < 0 ? n : n * -1, f = obj.c;
-   double p = f.x > f.y && f.x > f.z ? f.x : f.y > f.z ? f.y : f.z; // max refl
-   if (++depth > 5) if (erand48(Xi) < p) f = f * (1 / p); else return obj.e; //R.R.
-   if (obj.refl == DIFF){                  // Ideal DIFFUSE reflection
-      double r1 = 2 * M_PI * erand48(Xi), r2 = erand48(Xi), r2s = sqrt(r2);
-      Vec w = nl, u = ((fabs(w.x) > .1 ? Vec(0, 1) : Vec(1)) % w).norm(), v = w % u;
-      Vec d = (u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrt(1 - r2)).norm();
-      return obj.e + f.mult(radiance(Ray(x, d), depth, Xi));
+Vec radiance(const Ray& ray, int depth){
+
+   // distance to intersection
+   double t;                  
+
+   // id of intersected object
+   int id = 0;
+
+   // if miss, return black
+   if (!intersect(ray, t, id)){ return Vec(); } 
+   
+   // the hit object
+   const Sphere& obj = spheres[id];        
+   
+   // ray intersection point
+   Vec x = ray.origin + ray.direction * t;
+
+   // sphere normal
+   Vec n = (x - obj.position).norm();
+   
+   // properly oriented surface normal
+   Vec nl = n.dot(ray.direction) < 0 ? n : n * -1;
+   
+   // object color (BRDF modulator)
+   Vec f = obj.color;
+   
+   // use maximum reflectivity amount for russian roulette
+   double p = f.x > f.y && f.x > f.z ? f.x : f.y > f.z ? f.y : f.z;
+
+   // russian roulette
+   if (++depth > 5){
+      if (next() < p){ f = f * (1 / p); }
+      else { return obj.emission; }
    }
-   else if (obj.refl == SPEC)            // Ideal SPECULAR reflection
-      return obj.e + f.mult(radiance(Ray(x, r.d - n * 2 * n.dot(r.d)), depth, Xi));
-   Ray reflRay(x, r.d - n * 2 * n.dot(r.d));     // Ideal dielectric REFRACTION
-   bool into = n.dot(nl) > 0;                // Ray from outside going in?
-   double nc = 1, nt = 1.5, nnt = into ? nc / nt : nt / nc, ddn = r.d.dot(nl), cos2t;
-   if ((cos2t = 1 - nnt * nnt * (1 - ddn * ddn)) < 0)    // Total internal reflection
-      return obj.e + f.mult(radiance(reflRay, depth, Xi));
-   Vec tdir = (r.d * nnt - n * ((into ? 1 : -1) * (ddn * nnt + sqrt(cos2t)))).norm();
-   double a = nt - nc, b = nt + nc, R0 = a * a / (b * b), c = 1 - (into ? -ddn : tdir.dot(n));
-   double Re = R0 + (1 - R0) * c * c * c * c * c, Tr = 1 - Re, P = .25 + .5 * Re, RP = Re / P, TP = Tr / (1 - P);
-   return obj.e + f.mult(depth > 2 ? (erand48(Xi) < P ?   // Russian roulette
-      radiance(reflRay, depth, Xi) * RP : radiance(Ray(x, tdir), depth, Xi) * TP) :
-      radiance(reflRay, depth, Xi) * Re + radiance(Ray(x, tdir), depth, Xi) * Tr);
+   
+   // Ideal DIFFUSE reflection
+   if (obj.refl == DIFF){                  
+      
+      // angle around
+      double r1 = 2 * M_PI * next();
+      
+      // distance from center
+      double r2 = next(), r2s = sqrt(r2);
+      
+      // normal
+      Vec w = nl;
+
+      // u is perpendicular to w
+      Vec u = ((fabs(w.x) > .1 ? Vec(0, 1) : Vec(1)) % w).norm();
+      
+      // v is perpendicular to u and w
+      Vec v = w % u;
+
+      // d is random reflection ray
+      Vec d = (u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrt(1 - r2)).norm();
+      
+      return obj.emission + f.mult(radiance(Ray(x, d), depth));
+   }
+   // ideal SPECULAR reflection
+   else if (obj.refl == SPEC){           
+      return obj.emission + f.mult(radiance(Ray(x, ray.direction - n * 2 * n.dot(ray.direction)), depth));
+   }
+
+   // otherwise we have a dielectric (glass) surface -> ideal dielectic refraction
+   Ray reflRay(x, ray.direction - n * 2 * n.dot(ray.direction));
+
+   // ray from outside going in
+   bool into = n.dot(nl) > 0; 
+
+   double nc = 1;
+   double nt = 1.5;
+   double nnt = into ? nc / nt : nt / nc;
+   double ddn = ray.direction.dot(nl);
+   double cos2t;
+   
+   // Total internal reflection
+   if ((cos2t = 1 - nnt * nnt * (1 - ddn * ddn)) < 0){  
+      return obj.emission + f.mult(radiance(reflRay, depth));
+   }
+
+   // otherwise, choose reflection or refraction
+   Vec tdir = (ray.direction * nnt - n * ((into ? 1 : -1) * (ddn * nnt + sqrt(cos2t)))).norm();
+   double a = nt - nc, b = nt + nc;
+   double R0 = a * a / (b * b);
+   double c = 1 - (into ? -ddn : tdir.dot(n));
+   double Re = R0 + (1 - R0) * c * c * c * c * c;
+   double Tr = 1 - Re;
+   double P = .25 + .5 * Re;
+   double RP = Re / P;
+   double TP = Tr / (1 - P);
+   
+   // Russian roulette
+   return obj.emission + f.mult(depth > 2 ? (next() < P ?   
+      radiance(reflRay, depth) * RP : radiance(Ray(x, tdir), depth) * TP):
+      radiance(reflRay, depth) * Re + radiance(Ray(x, tdir), depth) * Tr);
 }
+
 int main(int argc, char* argv[]){
-   int w = 1024, h = 768, samps = argc == 2 ? atoi(argv[1]) / 4 : 1; // # samples
-   Ray cam(Vec(50, 52, 295.6), Vec(0, -0.042612, -1).norm()); // cam pos, dir
-   Vec cx = Vec(w * .5135 / h), cy = (cx % cam.d).norm() * .5135, r, * c = new Vec[w * h];
-#pragma omp parallel for schedule(dynamic, 1) private(r)       // OpenMP
-   for (int y = 0; y < h; y++){                       // Loop over image rows
-      fprintf(stderr, "\rRendering (%d spp) %5.2f%%", samps * 4, 100. * y / (h - 1));
-      for (unsigned short x = 0, Xi[3] = { 0,0,y * y * y }; x < w; x++)   // Loop cols
-         for (int sy = 0, i = (h - y - 1) * w + x; sy < 2; sy++)     // 2x2 subpixel rows
-            for (int sx = 0; sx < 2; sx++, r = Vec()){        // 2x2 subpixel cols
+   
+   // image size
+   int width = 1024, height = 768;
+   
+   // samples (defaults to 1)
+   int samps = argc == 2 ? atoi(argv[1]) / 4 : 1;
+   
+   // camera position and direction
+   Ray camera(Vec(50, 52, 295.6), Vec(0, -0.042612, -1).norm());
+
+   // x direction increment
+   Vec cx = Vec(width * .5135 / height);
+   
+   // y direction increment
+   Vec cy = (cx % camera.direction).norm() * .5135;
+
+   // Color of samples 
+   Vec r;
+   
+   // image
+   Vec* c = new Vec[width * height];
+   
+   // OpenMP
+   #pragma omp parallel for schedule(dynamic, 1) private(r)       
+   // Loop over image rows
+   for (int y = 0; y < height; y++){
+
+      // print progress
+      // std::cerr << "\rRendering (" << samps * 4 << " spp) %" << 100. * y / (height - 1); 
+      fprintf(stderr, "\rRendering (%d spp) %5.2f%%", samps * 4, 100. * y / (height - 1));
+      
+      // Loop over columns
+      for (int x = 0; x < width; x++)   
+         
+         // 2x2 subpixel rows
+         for (int sy = 0, i = (height - y - 1) * width + x; sy < 2; sy++)
+            
+            // 2x2 subpixel cols
+            for (int sx = 0; sx < 2; sx++, r = Vec()){        
+               
                for (int s = 0; s < samps; s++){
-                  double r1 = 2 * erand48(Xi), dx = r1 < 1 ? sqrt(r1) - 1 : 1 - sqrt(2 - r1);
-                  double r2 = 2 * erand48(Xi), dy = r2 < 1 ? sqrt(r2) - 1 : 1 - sqrt(2 - r2);
-                  Vec d = cx * (((sx + .5 + dx) / 2 + x) / w - .5) +
-                     cy * (((sy + .5 + dy) / 2 + y) / h - .5) + cam.d;
-                  r = r + radiance(Ray(cam.o + d * 140, d.norm()), 0, Xi) * (1. / samps);
+                 
+                  // Tent filter
+                  double r1 = 2 * next(), dx = r1 < 1 ? sqrt(r1) - 1 : 1 - sqrt(2 - r1);
+                  double r2 = 2 * next(), dy = r2 < 1 ? sqrt(r2) - 1 : 1 - sqrt(2 - r2);
+                  
+                  Vec d = cx * (((sx + .5 + dx) / 2 + x) / width - .5) + cy * (((sy + .5 + dy) / 2 + y) / height - .5) + camera.direction;
+                  
+                  r = r + radiance(Ray(camera.origin + d * 140, d.norm()), 0) * (1. / samps);
                } // Camera rays are pushed ^^^^^ forward to start in interior
+               
+               // Subpixel estimate
                c[i] = c[i] + Vec(clamp(r.x), clamp(r.y), clamp(r.z)) * .25;
             }
    }
-   FILE* f = fopen("image.ppm", "w");         // Write image to PPM file.
-   fprintf(f, "P3\n%d %d\n%d\n", w, h, 255);
-   for (int i = 0; i < w * h; i++)
+   std::cout << std::endl;
+
+   // write image to ppm file
+   FILE* f = fopen("image.ppm", "w");         
+   fprintf(f, "P3\n%d %d\n%d\n", width, height, 255);
+   for (int i = 0; i < width * height; i++)
       fprintf(f, "%d %d %d ", toInt(c[i].x), toInt(c[i].y), toInt(c[i].z));
 }
