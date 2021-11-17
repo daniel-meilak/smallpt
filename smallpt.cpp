@@ -1,35 +1,12 @@
 #include <cmath>   
 #include <cstdlib> 
 #include <cstdio>
+//#include <format> // not yet availible as of gcc 11
 #include <iostream>
+#include <omp.h>
 #include <random>
+#include <sstream>
 #include <vector>
-
-// // seed for randum num generator
-// static unsigned long s[2] = {1,1};
-
-// static inline unsigned long rotl(const unsigned long x, int k) {
-// 	return (x << k) | (x >> (64 - k));
-// }
-
-// // random number generator, using xoroshiro128+ for speed (outputs in range 0-1)
-// unsigned long next(void) {
-// 	const unsigned long s0 = s[0];
-// 	unsigned long s1 = s[1];
-// 	const unsigned long result = s0 + s1;
-
-// 	s1 ^= s0;
-// 	s[0] = rotl(s0, 24) ^ s1 ^ (s1 << 16); // a, b
-// 	s[1] = rotl(s1, 37); // c
-
-// 	return (result >> 11) * 0x1.0p-53;
-// }
-
-unsigned short Xi[3] = {0,0,5};
-double next(){
-   return erand48(Xi);
-}
-
 
 // material types, used in radiance()
 enum Refl_t{ DIFF, SPEC, REFR };
@@ -137,7 +114,7 @@ inline bool intersect(const Ray& ray, double& t, int& id){
    return t < inf;
 }
 
-Vec radiance(const Ray& ray, int depth){
+Vec radiance(const Ray& ray, int depth, unsigned short * seed){
 
    // distance to intersection
    double t;                  
@@ -168,7 +145,7 @@ Vec radiance(const Ray& ray, int depth){
 
    // russian roulette
    if (++depth > 5){
-      if (next() < p){ f = f * (1 / p); }
+      if (erand48(seed) < p){ f = f * (1 / p); }
       else { return obj.emission; }
    }
    
@@ -176,10 +153,10 @@ Vec radiance(const Ray& ray, int depth){
    if (obj.refl == DIFF){                  
       
       // angle around
-      double r1 = 2 * M_PI * next();
+      double r1 = 2 * M_PI * erand48(seed);
       
       // distance from center
-      double r2 = next(), r2s = sqrt(r2);
+      double r2 = erand48(seed), r2s = sqrt(r2);
       
       // normal
       Vec w = nl;
@@ -193,11 +170,11 @@ Vec radiance(const Ray& ray, int depth){
       // d is random reflection ray
       Vec d = (u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrt(1 - r2)).norm();
       
-      return obj.emission + f.mult(radiance(Ray(x, d), depth));
+      return obj.emission + f.mult(radiance(Ray(x, d), depth, seed));
    }
    // ideal SPECULAR reflection
    else if (obj.refl == SPEC){           
-      return obj.emission + f.mult(radiance(Ray(x, ray.direction - n * 2 * n.dot(ray.direction)), depth));
+      return obj.emission + f.mult(radiance(Ray(x, ray.direction - n * 2 * n.dot(ray.direction)), depth, seed));
    }
 
    // otherwise we have a dielectric (glass) surface -> ideal dielectic refraction
@@ -214,7 +191,7 @@ Vec radiance(const Ray& ray, int depth){
    
    // Total internal reflection
    if ((cos2t = 1 - nnt * nnt * (1 - ddn * ddn)) < 0){  
-      return obj.emission + f.mult(radiance(reflRay, depth));
+      return obj.emission + f.mult(radiance(reflRay, depth, seed));
    }
 
    // otherwise, choose reflection or refraction
@@ -229,9 +206,9 @@ Vec radiance(const Ray& ray, int depth){
    double TP = Tr / (1 - P);
    
    // Russian roulette
-   return obj.emission + f.mult(depth > 2 ? (next() < P ?   
-      radiance(reflRay, depth) * RP : radiance(Ray(x, tdir), depth) * TP):
-      radiance(reflRay, depth) * Re + radiance(Ray(x, tdir), depth) * Tr);
+   return obj.emission + f.mult(depth > 2 ? (erand48(seed) < P ?   
+      radiance(reflRay, depth, seed) * RP : radiance(Ray(x, tdir), depth, seed) * TP):
+      radiance(reflRay, depth, seed) * Re + radiance(Ray(x, tdir), depth, seed) * Tr);
 }
 
 int main(int argc, char* argv[]){
@@ -257,15 +234,19 @@ int main(int argc, char* argv[]){
    // image
    Vec* c = new Vec[width * height];
    
+   
+
    // OpenMP
    #pragma omp parallel for schedule(dynamic, 1) private(r)       
    // Loop over image rows
    for (int y = 0; y < height; y++){
 
       // print progress
-      // std::cerr << "\rRendering (" << samps * 4 << " spp) %" << 100. * y / (height - 1); 
+      // std::cerr << std::format("\rRendering ({} spp) {.2}%", samps * 4, 100. * y / (height -1));
       fprintf(stderr, "\rRendering (%d spp) %5.2f%%", samps * 4, 100. * y / (height - 1));
-      
+
+      unsigned short seed[3] = {0, 0, (unsigned short)(y*y*y)};      
+
       // Loop over columns
       for (int x = 0; x < width; x++)   
          
@@ -278,12 +259,16 @@ int main(int argc, char* argv[]){
                for (int s = 0; s < samps; s++){
                  
                   // Tent filter
-                  double r1 = 2 * next(), dx = r1 < 1 ? sqrt(r1) - 1 : 1 - sqrt(2 - r1);
-                  double r2 = 2 * next(), dy = r2 < 1 ? sqrt(r2) - 1 : 1 - sqrt(2 - r2);
+                  double r1 = 2 * erand48(seed);
+                  double r2 = 2 * erand48(seed);
                   
+                  double dx = r1 < 1 ? sqrt(r1) - 1 : 1 - sqrt(2 - r1);
+                  double dy = r2 < 1 ? sqrt(r2) - 1 : 1 - sqrt(2 - r2);
+                  
+
                   Vec d = cx * (((sx + .5 + dx) / 2 + x) / width - .5) + cy * (((sy + .5 + dy) / 2 + y) / height - .5) + camera.direction;
                   
-                  r = r + radiance(Ray(camera.origin + d * 140, d.norm()), 0) * (1. / samps);
+                  r = r + radiance(Ray(camera.origin + d * 140, d.norm()), 0, seed) * (1. / samps);
                } // Camera rays are pushed ^^^^^ forward to start in interior
                
                // Subpixel estimate
